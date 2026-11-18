@@ -220,6 +220,10 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
         elems = 256;
         bytes = 136;
         return true;
+    case 19:   // IQ1_S: fp16 d, 32 bytes of codes, 8 x u16 of high bits (Unsloth's UD-IQ2_XXS of Ornith-1.5-122B)
+        elems = 256;
+        bytes = 50;
+        return true;
     case 29:   // IQ1_M
         elems = 256;
         bytes = 56;

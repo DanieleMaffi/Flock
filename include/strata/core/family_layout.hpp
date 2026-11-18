@@ -249,8 +249,13 @@ inline bool check_gguf_layout(const strata::GgufModel& m, const ModelGeometry& g
             err = "missing " + name;
             return false;
         }
-        bool same = t->shape.size() == shape.size();
-        for (size_t i = 0; same && i < shape.size(); ++i) same = t->shape[i] == (uint64_t) shape[i];
+        // trailing dimensions of 1 do not count: a newer converter writes a vector as [n, 1] (Unsloth's UD-IQ2_XXS of
+        // Ornith-1.5-122B: ffn_gate_inp_shexp [3072, 1] where Qwen3.6's files have [3072]), the same values in the same order
+        size_t ng = t->shape.size(), nw = shape.size();
+        while (ng > 1 && t->shape[ng - 1] == 1) --ng;
+        while (nw > 1 && shape[nw - 1] == 1) --nw;
+        bool same = ng == nw;
+        for (size_t i = 0; same && i < nw; ++i) same = t->shape[i] == (uint64_t) shape[i];
         if (!same) {
             std::string got, want;
             for (uint64_t d : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(d);
