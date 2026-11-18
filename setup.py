@@ -4761,7 +4761,10 @@ def engine_env(eng: Path) -> dict:
     nothing); on Linux and elsewhere it is LD_LIBRARY_PATH, where a probe without it exits 127 on libhipblas.so.3 and
     prints nothing."""
     env = dict(os.environ)
-    dirs = [str(d) for d in hip_lib_dirs(eng)]
+    # and the engine's own folder: a CUDA engine component keeps libcudart / libcublas beside the binary (the Docker
+    # image's /opt/strata/components/engine/<version>); without it `strata --families` exits 127 and an own-path family
+    # (Qwen3.6, Ornith) reads as not run by this engine
+    dirs = [str(d) for d in hip_lib_dirs(eng)] + [str(eng)]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
         env[var] = os.pathsep.join(dirs + ([env[var]] if env.get(var) else []))
