@@ -1157,6 +1157,134 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, in
     return true;
 }
 
+
+// ------------------------------------------------------------------------------------------------ flock: the gather
+/// The streamed prompt layers of the tiered split: one per card, its own thread.  A layer's experts without a VRAM slot are
+/// copied from the mapped GGUF (gate / up / down: three tensors, pageable memory) into pinned bounce slots by several
+/// threads, then sent to the card's staging buffer by one asynchronous copy per batch, on the card's copy stream.  The
+/// engine's thread only queues the layer (stream_kick) and waits for it (stream_take): a pageable cudaMemcpy would block it
+/// for the whole copy, so the copies of layer i + 2 could not overlap the GPU work of layer i.
+struct Gather {
+    struct Job {
+        const Layer* L = nullptr;
+        std::vector<int> slot_of;   // the layer's slot table when the job was queued (rebalance runs between forwards)
+        uint8_t* stage = nullptr;
+        cudaEvent_t used = nullptr, copy = nullptr;
+        uint64_t id = 0;
+    };
+    int dev = 0, n_threads = 4;
+    cudaStream_t cst = nullptr;
+    static constexpr int kSlots = 4;
+    size_t slot_bytes = 0;
+    uint8_t* bounce[kSlots] = {};
+    cudaEvent_t ev[kSlots] = {};
+    int next = 0;
+    std::mutex mu;
+    std::condition_variable cv, cv_done;
+    std::deque<Job> q;
+    uint64_t submitted = 0, finished = 0;
+    bool stop = false;
+    std::thread th;
+
+    Gather(int dev_, cudaStream_t cst_, size_t slot_bytes_) : dev(dev_), cst(cst_), slot_bytes(slot_bytes_) {
+        if (const char* v = std::getenv("STRATA_Q36_GATHER_THREADS")) n_threads = std::max(1, std::min(32, std::atoi(v)));
+        for (int i = 0; i < kSlots; ++i) {
+            CK(cudaHostAlloc((void**) &bounce[i], slot_bytes, cudaHostAllocPortable));
+            CK(cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming));
+        }
+        th = std::thread([this] { run(); });
+    }
+    ~Gather() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            stop = true;
+        }
+        cv.notify_all();
+        if (th.joinable()) th.join();
+    }
+    /// Queue a layer: its id, which wait() takes.
+    uint64_t submit(Job j) {
+        std::lock_guard<std::mutex> lk(mu);
+        j.id = ++submitted;
+        q.push_back(std::move(j));
+        cv.notify_all();
+        return submitted;
+    }
+    /// Until job `id`'s copies are queued on the copy stream and its `copy` event recorded.
+    void wait(uint64_t id) {
+        std::unique_lock<std::mutex> lk(mu);
+        cv_done.wait(lk, [&] { return finished >= id; });
+    }
+    void run() {
+        CK(cudaSetDevice(dev));
+        for (;;) {
+            Job j;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&] { return stop || !q.empty(); });
+                if (stop && q.empty()) return;
+                j = std::move(q.front());
+                q.pop_front();
+            }
+            one(j);
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                finished = j.id;
+            }
+            cv_done.notify_all();
+        }
+    }
+    /// Experts [x0, x0 + k) of L into bounce slot `sl`: each in the blob layout, its padding up to the stride zeroed (the
+    /// slot held another layer's blobs, whose stride can differ), the work split over n_threads threads.
+    void fill(const Layer& L, int x0, int k, uint8_t* dst) {
+        auto part = [&](int t) {
+            for (int e = x0 + t; e < x0 + k; e += n_threads) {
+                uint8_t* b = dst + (size_t) (e - x0) * L.stride;
+                std::memcpy(b, L.src_g + (size_t) e * L.src_gsz, L.src_gsz);
+                std::memcpy(b + L.L.up_off, L.src_u + (size_t) e * L.src_gsz, L.src_gsz);
+                std::memcpy(b + L.L.down_off, L.src_d + (size_t) e * L.src_dsz, L.src_dsz);
+                if (L.stride > L.L.bytes) std::memset(b + L.L.bytes, 0, L.stride - L.L.bytes);
+            }
+        };
+        const int nt = std::min(n_threads, k);
+        std::vector<std::thread> ts;
+        for (int t = 1; t < nt; ++t) ts.emplace_back(part, t);
+        part(0);
+        for (auto& t : ts) t.join();
+    }
+    void one(const Job& j) {
+        const Layer& L = *j.L;
+        const int ne = (int) j.slot_of.size();
+        CK(cudaStreamWaitEvent(cst, j.used, 0));
+        const int per = std::max(1, (int) (slot_bytes / L.stride));
+        for (int x = 0; x < ne;) {
+            const bool on_dev = j.slot_of[(size_t) x] >= 0;
+            int y = x + 1;
+            if (on_dev)
+                while (y < ne && j.slot_of[(size_t) y] == j.slot_of[(size_t) y - 1] + 1) ++y;
+            else
+                while (y < ne && j.slot_of[(size_t) y] < 0) ++y;
+            if (on_dev) {
+                CK(cudaMemcpyAsync(j.stage + (size_t) x * L.stride, L.blobs + (size_t) j.slot_of[(size_t) x] * L.stride,
+                                   (size_t) (y - x) * L.stride, cudaMemcpyDeviceToDevice, cst));
+            } else {
+                for (int x0 = x; x0 < y; x0 += per) {
+                    const int k = std::min(per, y - x0);
+                    const int sl = next;
+                    next = (next + 1) % kSlots;
+                    CK(cudaEventSynchronize(ev[sl]));   // the slot's last copy is done (never recorded: returns at once)
+                    fill(L, x0, k, bounce[sl]);
+                    CK(cudaMemcpyAsync(j.stage + (size_t) x0 * L.stride, bounce[sl], (size_t) k * L.stride,
+                                       cudaMemcpyHostToDevice, cst));
+                    CK(cudaEventRecord(ev[sl], cst));
+                }
+            }
+            x = y;
+        }
+        CK(cudaEventRecord(j.copy, cst));
+    }
+};
+
 /// Expert e of layer L as its native blob [gate | up | down] (L.L.bytes) at dst (host memory).
 void expert_blob(const Layer& L, int64_t e, uint8_t* dst) {
     std::memcpy(dst, L.src_g + (size_t) e * L.src_gsz, L.src_gsz);
@@ -1444,6 +1572,9 @@ struct Engine {
     cudaStream_t cst = nullptr;
     cudaEvent_t ev_copy[2] = {}, ev_used[2] = {};
     std::vector<int> stream_seq;   // the state indices a streamed forward visits, in order
+    std::unique_ptr<Gather> gathers[2];   // flock: the tiered split's copy workers, per card (place_split)
+    uint64_t gjob[2][2] = {};             // the job queued for each card's staging buffer b
+    Gather* gather_now() { return gathers[split() ? cur_dev : 0].get(); }
     int stream_pos = 0;
     long long hy_cpu = 0, hy_gpu = 0, hy_swaps = 0;   // entries computed on the CPU / GPU, slot replacements
     double hy_cpu_ms = 0;
@@ -2536,6 +2667,16 @@ struct Engine {
     void stream_kick(int i) {   // the i-th layer of the sequence into staging buffer i % 2, after its last reader
         const int b = i % 2;
         const Layer& L = layer_at(stream_seq[(size_t) i]);
+        if (Gather* gt = gather_now()) {   // flock: the card's gather thread copies it (see Gather)
+            Gather::Job j;
+            j.L = &L;
+            j.slot_of = hy[(size_t) stream_seq[(size_t) i]].slot_of;
+            j.stage = stage[b];
+            j.used = ev_used[b];
+            j.copy = ev_copy[b];
+            gjob[split() ? cur_dev : 0][b] = gt->submit(std::move(j));
+            return;
+        }
         CK(cudaStreamWaitEvent(cst, ev_used[b], 0));
         // the experts with a VRAM slot come from it (device to device, at VRAM speed), only the others over PCIe; runs
         // of consecutive experts from the same source in one copy each.  STRATA_Q36_STREAM_ALL=1: the whole layer from
@@ -2573,6 +2714,8 @@ struct Engine {
             std::exit(1);
         }
         const int b = stream_pos % 2;
+        // the gather: its copy event is recorded once the job has run; waiting on it before would wait on the last record
+        if (Gather* gt = gather_now()) gt->wait(gjob[split() ? cur_dev : 0][b]);
         CK(cudaStreamWaitEvent(st, ev_copy[b], 0));
         return stage[b];
     }
@@ -3209,7 +3352,13 @@ bool place_split(Model& m, Engine& E, int threads, int hybrid_t, int slots, std:
     // copy, or tiered from the mapped GGUF); STRATA_Q36_SPLIT_STREAM=0 runs them as the decode does
     const char* ssv = std::getenv("STRATA_Q36_SPLIT_STREAM");
     const bool stream = E.use_pf && !(ssv && std::atoi(ssv) == 0);
-    E.hybrid_t = stream ? std::max(1, std::min(hybrid_t, E.tmax)) : E.tmax;
+    // a streamed chunk copies every layer's other experts (tens of GB) whatever its size, so it pays from about a thousand
+    // rows; below, the rows run as the decode does (measured: a 243-token prompt took 16.7 s streamed).
+    // STRATA_Q36_STREAM_ROWS sets the threshold (the rows of a chunk that still runs as the decode does)
+    int rows = 1024;
+    if (const char* rv = std::getenv("STRATA_Q36_STREAM_ROWS")) rows = std::max(1, std::atoi(rv));
+    (void) hybrid_t;
+    E.hybrid_t = stream ? std::max(1, std::min(rows, E.tmax)) : E.tmax;
     const size_t T = (size_t) E.tmax, N = (size_t) g.n_embd, Kp = (size_t) m.top_k;
     const size_t bufs = T * Kp * N * 4 + T * Kp * 4;   // the CPU part's outputs and miss flags, per card
     const size_t reserve = (size_t) 768 << 20;
@@ -3225,6 +3374,8 @@ bool place_split(Model& m, Engine& E, int threads, int hybrid_t, int slots, std:
             if (m.dev_of(li) == d) max_layer = std::max(max_layer, all[li]->stride * (size_t) ne);
         if (stream) {   // this card's staging pair, before the slots take the room
             CK(cudaStreamCreateWithFlags(&E.cst, cudaStreamNonBlocking));
+            const char* gv = std::getenv("STRATA_Q36_GATHER");   // =0: the engine's thread copies (pageable)
+            if (m.tiered && !(gv && std::atoi(gv) == 0)) E.gathers[d] = std::make_unique<Gather>(d, E.cst, (size_t) 128 << 20);
             for (int b = 0; b < 2; ++b) {
                 CK(cudaMalloc(&E.stage[b], max_layer + kMmqTail));
                 CK(cudaMemset(E.stage[b], 0, max_layer + kMmqTail));
