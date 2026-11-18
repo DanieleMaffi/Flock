@@ -101,6 +101,7 @@ HF_REVISIONS = {
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": "1ada08422e404aca51ab9df665f089f34c419c6b",           # 2026-10-13
+    "unsloth/Ornith-1.5-122B-GGUF": "745bd742473a6cdddb1c6f78fb9a3b3a9293bd41",                      # 2026-10-21
 }
 
 
@@ -772,6 +773,37 @@ OWN_PATH_FAMILIES = {
                # the 30 GDN layers (state_gb)
                "vision": True, "state_gb": 0.07}
 }
+# Ornith-1.5-122B (qwen35moe, Qwen3.5-122B-A10B's shape: 48 layers, 3072 wide, 256 experts top-8, MTP block): the same
+# engine path, in its tiered mode when the experts do not fit in RAM (Model::tiered in src/qwen35/q36_engine.cu: no host
+# copy, the experts read in place from the mapped GGUF, the page cache keeping the busiest).  Unsloth's UD-Q4_K_XL comes
+# in three shards, which download() does not fetch, so "local" families take the files from --gguf-dir
+# (tools/ornith/fetch.py downloads and checks them) and are not downloaded here; the picture reader is.
+# Opt-in: it joins OWN_PATH_FAMILIES only in a process started with --family ornith (setup.py, or `strata launch`,
+# whose catalog imports this file), so the menu, the app's catalog and every other run stay as they were.
+ORNITH_FILES = {   # unsloth/Ornith-1.5-122B-GGUF at HF_REVISIONS' commit
+    "Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf": (10942929, "7159d31a6a6ce5528500b490880383844c3c9b21fcdaad94e66c9e65233ff359"),
+    "Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf": (49971099680, "e66952128394bb4c75554c7e10a12a8b63dd1c7f049d876a02885a946e30c1c3"),
+    "Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf": (29731729056, "21325ec18a9e3210eeffada0fc327a25a79171918f1d04f8f0a06b61866ac9ba"),
+    "mmproj-F16.gguf": (908724544, "39db176176a904b101f5173a4f03e785990f9279f94ab373c4fd629ae7011817"),
+}
+LOCAL_FAMILIES = {"ornith": {
+    "title": "Ornith-1.5-122B", "by": "ornith-ai; GGUFs by Unsloth (tools/ornith/fetch.py)",
+    "arch": "qwen35moe", "local": True,
+    # two cards or more: the engine splits the layers over the first two (STRATA_Q36_SPLIT, src/qwen35/q36_engine.cu)
+    "split": True,
+    "about": "122B mixture of experts with 10B active (256 experts, top-8), Qwen3.5-122B-A10B's shape",
+    "hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "file": "Ornith-1.5-122B-{q}-00001-of-00003.gguf", "tag": "ornith-",
+    "mmproj_hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "mmproj": "mmproj-F16.gguf",
+    "name": "ornith-1.5-122b", "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B/blob/main/LICENSE",
+    # RAM: the tiered mode keeps no copy of the experts; what RAM there is serves as their page cache (measured: runs on a
+    # 62 GB PC with one RTX 3090)
+    "models": {"UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), 80 GB in three files", "ram_gb": 48}},
+    "sha256": ORNITH_FILES,
+    # 12 attention layers + the MTP block, 2 KV heads x 256, K and V in fp32 (as qwen36's)
+    "kv_bytes_per_token": 13 * 2 * 256 * 2 * 4,
+    "mtp": 2,
+    # 36 GDN layers x 64 value heads x 128 x 128 fp32 of recurrent state per session
+    "vision": True, "state_gb": 0.16}}
 PREVIEW_FAMILIES = OWN_PATH_FAMILIES             # the earlier name (tools and tests that import it)
 
 # Every model file Strata downloads has a fixed size and SHA-256: (repository, file name) -> (bytes, sha256).  download()
@@ -785,6 +817,10 @@ REPO_PINS = {
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": QWEN36_FILES,
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": GYRO_FILES,
 }
+_argv = sys.argv[1:]
+if any(_argv[i:i + 2] == ["--family", f] or v == f"--family={f}" for f in LOCAL_FAMILIES for i, v in enumerate(_argv)):
+    OWN_PATH_FAMILIES.update(LOCAL_FAMILIES)
+    REPO_PINS["unsloth/Ornith-1.5-122B-GGUF"] = {"mmproj-F16.gguf": ORNITH_FILES["mmproj-F16.gguf"]}
 # the files of a repository at a commit other than HF_REVISIONS' (UNSLOTH_V31_REVISION): (repository, commit) -> name -> (bytes, sha256); file_pin looks here first
 REV_PINS = {(UNSLOTH_REPO, UNSLOTH_V31_REVISION): {**UNSLOTH_V31_SHARDS, **UNSLOTH_Q4_V31_SHARDS}}
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -8721,7 +8757,10 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     ok(f"model: {fam['title']}")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
-    if multi:
+    split_gpus = list(multi[:2]) if fam.get("split") and len(multi) >= 2 else []
+    if split_gpus:
+        ok(f"{fam['title']}: its layers split over GPUs {split_gpus[0]} and {split_gpus[1]}")
+    elif multi:
         warn(f"{fam['title']} runs on one GPU so far: using GPU {gpu.get('index', 0)} ({gpu_name(gpu)}) only")
     names = list(fam["models"])
     if a.model and a.model not in names:
@@ -8766,6 +8805,9 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         warn(too_big)
     ok(f"context: {ctx} tokens")
     vision = own_path_vision(a, fam, gpu, hip)
+    if split_gpus and vision != "none":
+        warn("pictures are off with the two-GPU split so far")
+        vision = "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
     vram_gb = float(gpu.get("vram_gb", 0.0))
     par = getattr(a, "parallel", None)
@@ -8788,7 +8830,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     part = gguf.with_name(gguf.name + ".part")
     def have(p: Path) -> bool:                         # --gguf-dir: the person's own file has no finish mark; verify_sha256 checks and writes it
         return p.exists() and (done(p) or bool(a.gguf_dir))
-    left = 0 if have(gguf) else (size - (part.stat().st_size if part.is_file() else 0)) / 1e9
+    left = 0 if have(gguf) or fam.get("local") else (size - (part.stat().st_size if part.is_file() else 0)) / 1e9
     if left and free_gb(folder) < left:
         fail(f"not enough free disk space in {folder}: need ~{left:.0f} GB, {free_gb(folder):.0f} GB free", ("use --data-dir on a bigger drive (strata launch --data-dir)" if CONTROL else "use --models-dir on a bigger drive"))
     if left and free_gb(folder) < left + 1:
@@ -8818,13 +8860,21 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     ok("engine: the engine component (looked up when the model loads)" if CONTROL else f"engine: {eng / EXE}")
 
     step(5, f"downloading {fam['title']} {model}")
-    if have(gguf):
+    # a local family's model files: every pinned shard of this size (the first one is gguf); they come with --gguf-dir
+    parts = [n for n in fam["sha256"] if n.startswith(gguf.name.split("-00001-of-")[0])] if fam.get("local") else [gguf.name]
+    if fam.get("local"):
+        missing = [n for n in parts if not (folder / n).is_file()]
+        if missing:
+            fail(f"{', '.join(missing)} missing in {folder}",
+                 f"download them with: python3 tools/ornith/fetch.py {folder}, then run setup with --gguf-dir {folder}")
+    elif have(gguf):
         ok(f"{gguf.name} already downloaded")
     else:
         if a.gguf_dir:
             fail(f"{gguf} is missing", f"put {gguf.name} in {folder}, or drop --gguf-dir to download it")
         download(fam["hf"] + gguf.name, gguf)
-    verify_sha256(gguf, *fam["sha256"][gguf.name], own=bool(a.gguf_dir))
+    for n in parts:
+        verify_sha256(folder / n, *fam["sha256"][n], own=bool(a.gguf_dir))
     ok(f"model file: {gguf}")
     mmproj = folder / fam["mmproj"]
     if vision != "none":                               # the image encoder: Unsloth's mmproj, pinned, size + SHA-256 checked
@@ -8835,7 +8885,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         if have(mmproj):
             ok(f"{mmproj.name} already downloaded")
         else:
-            if a.gguf_dir:
+            if a.gguf_dir and not fam.get("local"):   # a local family's --gguf-dir holds the built file only: the reader is fetched
                 fail(f"{mmproj} is missing", f"put {mmproj.name} in {folder}, or drop --gguf-dir to download it")
             download(fam["mmproj_hf"] + mmproj.name, mmproj, "vision encoder")
         verify_sha256(mmproj, *fam["sha256"][mmproj.name], own=bool(a.gguf_dir))
@@ -8863,7 +8913,11 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         cfg["cuda"] = 12
     if hip:
         cfg["backend"] = "hip"
-    if gpu.get("count", 1) > 1 or a.gpu is not None:
+    if split_gpus:
+        cfg["gpu"] = split_gpus
+        cfg["gpus_asked"] = True
+        cfg["env"] = {**(cfg.get("env") or {}), "STRATA_Q36_SPLIT": "auto"}
+    elif gpu.get("count", 1) > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]
         cfg["gpus_asked"] = True
     if a.host:

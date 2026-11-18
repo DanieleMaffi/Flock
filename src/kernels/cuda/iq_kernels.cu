@@ -852,11 +852,12 @@ STRATA_TQP_FMT(149)
 #else
 #define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(147) X(148) X(149)
 #endif
-// Q5_K / Q6_K downs: Qwen3.6-35B-A3B (FF 512, whole 256-blocks per row); Flash-Next's FF 640 never selects them
+// Q4_K / Q5_K / Q6_K downs: Qwen3.6-35B-A3B (FF 512) and Ornith-1.5-122B (FF 1024, Unsloth's UD-Q4_K_XL), whole
+// 256-blocks per row; Flash-Next's FF 640 never selects them
 #ifdef STRATA_Q6K_EXPERTS
-#define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8) X(13) X(14) X(40) X(144) X(146) X(147) X(148) X(149)
+#define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8) X(12) X(13) X(14) X(40) X(144) X(146) X(147) X(148) X(149)
 #else
-#define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8) X(13) X(40) X(144) X(146) X(147) X(148) X(149)
+#define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8) X(12) X(13) X(40) X(144) X(146) X(147) X(148) X(149)
 #endif
 #define STRATA_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(7) X(6) X(2) X(3) X(8) X(40) X(144) X(145) X(146) X(147) X(148) X(149)
 template<> struct Fmt<40> { static constexpr int qk = 64, ipb = 2, step = 4;     // NVFP4: 2 calls of 32 values
@@ -6390,6 +6391,7 @@ void native_expert_i8(const NativeExpertLayout& L, const unsigned long long* grp
     else if (L.d_type == 6) i8_launch<6, false>(tm, a, s);
     else if (L.d_type == 8) i8_launch<8, false>(tm, a, s);
     else if (L.d_type == 7) i8_launch<7, false>(tm, a, s);
+    else if (L.d_type == 12) i8_launch<12, false>(tm, a, s);
     else if (L.d_type == 13) i8_launch<13, false>(tm, a, s);
     else if (L.d_type == 14) i8_launch<14, false>(tm, a, s);
     else i8_launch<42, false>(tm, a, s);

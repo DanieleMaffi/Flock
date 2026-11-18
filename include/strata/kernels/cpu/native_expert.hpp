@@ -25,10 +25,16 @@ constexpr size_t native_act_bytes_for(int64_t n) {
 /// 4096 of the Flash-Next engine, and it grows with the compiled hidden size (4096 values need 4672).
 inline constexpr size_t kNativeActBytes =
     native_act_bytes_for(strata::core::kCompiledGeometry.n_embd) > 4096 ? native_act_bytes_for(strata::core::kCompiledGeometry.n_embd) : 4096;
-/// Bytes of the largest quantized down activation (640 values as Q8_0: 20 x 34, or Q8_K 3 x 292); never below 1024,
-/// and it grows with the compiled expert width (1024 values as Q8_K need 1168).
+/// Bytes of the largest quantized down activation (640 values as Q8_0: 20 x 34, or Q8_K 3 x 292); never below 1168
+/// (1024 values as Q8_K: the experts of Ornith-1.5-122B, which the strata-q36 path runs without a compiled shape of its
+/// own), and it grows with the compiled expert width.  Scratch only: a larger size changes no value.
+/// The widest expert (n_ff) the native pool phases take: the compiled width or 1024 (Ornith-1.5-122B), whichever is
+/// larger.  The pool's per-token gate/up results are this wide; native_fmt refuses a wider layer.
+inline constexpr int64_t kNativeMaxFF =
+    strata::core::kCompiledGeometry.n_ff > 1024 ? strata::core::kCompiledGeometry.n_ff : 1024;
 inline constexpr size_t kNativeHBytes =
-    native_act_bytes_for(strata::core::kCompiledGeometry.n_ff) > 1024 ? native_act_bytes_for(strata::core::kCompiledGeometry.n_ff) : 1024;
+    native_act_bytes_for(strata::core::kCompiledGeometry.n_ff) > native_act_bytes_for(1024)
+        ? native_act_bytes_for(strata::core::kCompiledGeometry.n_ff) : native_act_bytes_for(1024);
 
 /// Arithmetic fixed for one pool batch. WindowInvariant preserves the legacy singleton result at every width.
 enum class NativeArithmetic { Default, WindowInvariant };
