@@ -36,10 +36,14 @@ class Ornith(unittest.TestCase):
         self.assertTrue(fam["local"])
         self.assertTrue(fam["split"])   # two cards: setup writes both and STRATA_Q36_SPLIT=auto
         for m in fam["models"]:   # every size names a file the table knows (the menu reads its size)
-            self.assertIn(fam["file"].format(q=m), fam["sha256"])
-        self.assertEqual(fam["kv_bytes_per_token"], 53248)
+            self.assertIn(s.own_path_file(fam, m), fam["sha256"])
+        self.assertEqual(fam["kv_bytes_per_token"], 13 * 2 * (256 + 4) * 2)   # int8 K and V with a scale per head
         self.assertEqual(s.file_pin(fam["mmproj_hf"] + fam["mmproj"]), fam["sha256"]["mmproj-F16.gguf"])
-        self.assertEqual(s.own_path_size(fam, 62.0), "UD-Q4_K_XL")
+        self.assertEqual(s.own_path_size(fam, 62.0), "UD-IQ2_XXS")   # the family's pick: it fits two 24 GB cards
+        self.assertEqual(s.own_path_file(fam, "UD-IQ2_XXS"), "Ornith-1.5-122B-UD-IQ2_XXS.gguf")
+        self.assertEqual(s.own_path_bytes(fam, "UD-Q4_K_XL"), 10942929 + 49971099680 + 29731729056)   # all three shards
+        self.assertEqual(s.own_path_bytes(fam, "UD-IQ2_XXS"), 41967395072)
+        self.assertTrue(fam["kv8"])
         self.assertEqual(sorted(n for n in fam["sha256"] if n.startswith("Ornith-1.5-122B-UD-Q4_K_XL-")),
                          [f"Ornith-1.5-122B-UD-Q4_K_XL-0000{i}-of-00003.gguf" for i in (1, 2, 3)])
 

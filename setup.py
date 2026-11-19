@@ -784,6 +784,7 @@ ORNITH_FILES = {   # unsloth/Ornith-1.5-122B-GGUF at HF_REVISIONS' commit
     "Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf": (10942929, "7159d31a6a6ce5528500b490880383844c3c9b21fcdaad94e66c9e65233ff359"),
     "Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf": (49971099680, "e66952128394bb4c75554c7e10a12a8b63dd1c7f049d876a02885a946e30c1c3"),
     "Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf": (29731729056, "21325ec18a9e3210eeffada0fc327a25a79171918f1d04f8f0a06b61866ac9ba"),
+    "Ornith-1.5-122B-UD-IQ2_XXS.gguf": (41967395072, "0497778d4f7f5008dec2d4b102183a699faf8433d0102dd143e86f9db13a3adc"),
     "mmproj-F16.gguf": (908724544, "39db176176a904b101f5173a4f03e785990f9279f94ab373c4fd629ae7011817"),
 }
 LOCAL_FAMILIES = {"ornith": {
@@ -792,15 +793,21 @@ LOCAL_FAMILIES = {"ornith": {
     # two cards or more: the engine splits the layers over the first two (STRATA_Q36_SPLIT, src/qwen35/q36_engine.cu)
     "split": True,
     "about": "122B mixture of experts with 10B active (256 experts, top-8), Qwen3.5-122B-A10B's shape",
+    # one file per size, or the first of a size's shards (files_of)
     "hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "file": "Ornith-1.5-122B-{q}-00001-of-00003.gguf", "tag": "ornith-",
+    "files_of": {"UD-IQ2_XXS": "Ornith-1.5-122B-UD-IQ2_XXS.gguf"},
+    "recommend": "UD-IQ2_XXS",   # every expert in VRAM on two 24 GB cards: several times the 4-bit size's speed
     "mmproj_hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "mmproj": "mmproj-F16.gguf",
     "name": "ornith-1.5-122b", "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B/blob/main/LICENSE",
     # RAM: the tiered mode keeps no copy of the experts; what RAM there is serves as their page cache (measured: runs on a
     # 62 GB PC with one RTX 3090)
-    "models": {"UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), 80 GB in three files", "ram_gb": 48}},
+    "models": {"UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic), 42 GB: every expert in VRAM on two 24 GB cards", "ram_gb": 48},
+               "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), 80 GB in three files: closer to the full model, much slower",
+                              "ram_gb": 48}},
     "sha256": ORNITH_FILES,
-    # 12 attention layers + the MTP block, 2 KV heads x 256, K and V in fp32 (as qwen36's)
-    "kv_bytes_per_token": 13 * 2 * 256 * 2 * 4,
+    # 12 attention layers + the MTP block, 2 KV heads, K and V in int8: 256 bytes + a 4-byte scale per head (STRATA_Q36_KV)
+    "kv_bytes_per_token": 13 * 2 * (256 + 4) * 2,
+    "kv8": True,
     "mtp": 2,
     # 36 GDN layers x 64 value heads x 128 x 128 fp32 of recurrent state per session
     "vision": True, "state_gb": 0.16}}
@@ -8639,10 +8646,28 @@ def own_path_context_warning(fam: dict, model: str, vram_gb: float, ctx: int) ->
     return own_path_fit.warning(own_path_fit.inputs(fam.get("name"), model), vram_gb, ctx, own_path_contexts())
 
 
+def own_path_file(fam: dict, model: str) -> str:
+    """A size's model file (the first shard of a sharded size)."""
+    return fam.get("files_of", {}).get(model) or fam["file"].format(q=model)
+
+
+def own_path_bytes(fam: dict, model: str) -> int:
+    """A size's download: its file, or all its shards (-0000N-of-0000M: the pinned files that share the first one's stem)."""
+    name = own_path_file(fam, model)
+    if "-00001-of-" not in name:
+        return fam["sha256"][name][0]
+    stem = name.split("-00001-of-")[0]
+    return sum(v[0] for k, v in fam["sha256"].items() if k.startswith(stem + "-0000"))
+
+
 def own_path_size(fam: dict, ram: float) -> str:
-    """The recommended size: the largest file whose RAM need this PC has (the smallest when none fits)."""
+    """The recommended size: the family's own pick (\"recommend\") when this PC has its RAM, else the largest file whose
+    RAM need this PC has (the smallest when none fits)."""
+    rec = fam.get("recommend")
+    if rec in fam["models"] and ram >= fam["models"][rec]["ram_gb"]:
+        return rec
     fits = [m for m, d in fam["models"].items() if ram >= d["ram_gb"]]
-    return max(fits, key=lambda m: fam["sha256"][fam["file"].format(q=m)][0]) if fits else next(iter(fam["models"]))
+    return max(fits, key=lambda m: own_path_bytes(fam, m)) if fits else next(iter(fam["models"]))
 
 
 def own_path_vision(a, fam: dict, gpu: dict, hip: bool) -> str:
@@ -8692,7 +8717,7 @@ PARALLEL_SMALL_SHARE = 0.35     # a card that does not hold every expert: the sl
 def own_path_parallel_fits_all(fam: dict, model: str, vram_gb: float, ctx: int, n: int) -> bool:
     """True where every routed expert still sits in VRAM beside n slots' sessions (one more session than the slots: the
     solo path's own)."""
-    size = fam["sha256"][fam["file"].format(q=model)][0] / 1e9
+    size = own_path_bytes(fam, model) / 1e9
     base = size * 0.93 + 4.5       # the routed experts + the dense weights and buffers (the file's 7% beyond them)
     return base + (n + 1) * own_path_parallel_slot_gb(fam, ctx) <= vram_gb
 
@@ -8771,7 +8796,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     say()
     for i, m in enumerate(names, 1):
         d = fam["models"][m]
-        size = fam["sha256"][fam["file"].format(q=m)][0]
+        size = own_path_bytes(fam, m)
         from strata_control import fit_label
         fit = f"   <- {fit_label.label(size / 1e9, ram, low_ram_vram(gpu))}"        # the file against the RAM and the card's memory together
         say(f"  {i}) {m:10s} {d['about']}; download {size / 1e9:.1f} GB{fit}")
@@ -8828,7 +8853,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         warn(f"--rope-scaling / --kv / --resident-budget-gib / --low-ram are Flash-Next settings: {fam['title']} "
              "does not use them")
     folder = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
-    gguf = folder / fam["file"].format(q=model)
+    gguf = folder / own_path_file(fam, model)
     size = fam["sha256"][gguf.name][0]
     part = gguf.with_name(gguf.name + ".part")
     def have(p: Path) -> bool:                         # --gguf-dir: the person's own file has no finish mark; verify_sha256 checks and writes it
@@ -8864,7 +8889,8 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
 
     step(5, f"downloading {fam['title']} {model}")
     # a local family's model files: every pinned shard of this size (the first one is gguf); they come with --gguf-dir
-    parts = [n for n in fam["sha256"] if n.startswith(gguf.name.split("-00001-of-")[0])] if fam.get("local") else [gguf.name]
+    parts = ([n for n in fam["sha256"] if n.startswith(gguf.name.split("-00001-of-")[0])] if "-00001-of-" in gguf.name else [gguf.name]) \
+        if fam.get("local") else [gguf.name]
     if fam.get("local"):
         missing = [n for n in parts if not (folder / n).is_file()]
         if missing:
@@ -8916,6 +8942,11 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         cfg["cuda"] = 12
     if hip:
         cfg["backend"] = "hip"
+    if fam.get("kv8"):   # the attention cache in int8 (src/qwen35/q36_engine.cu, STRATA_Q36_KV)
+        cfg["env"] = {**(cfg.get("env") or {}), "STRATA_Q36_KV": "int8"}
+    prof = ROOT / "data" / "ornith" / f"{model}.profile"   # a recorded expert-usage profile (tools/ornith/profile_curve.py)
+    if fam.get("local") and prof.is_file():
+        cfg["env"] = {**(cfg.get("env") or {}), "STRATA_Q36_PROFILE": str(prof)}
     if split_gpus:
         cfg["gpu"] = split_gpus
         cfg["gpus_asked"] = True
@@ -8988,14 +9019,14 @@ def preview_family(a) -> int:
     ram = ram_gb()
     for i, m in enumerate(names, 1):
         d = fam["models"][m]
-        size = fam["sha256"][fam["file"].format(q=m)][0]
+        size = own_path_bytes(fam, m)
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
         say(f"  {i}) {m:10s} {d['about']}; download {size / 1e9:.1f} GB{fit}")
     if a.check:
         return 0
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], "1", a.yes)) - 1]
     say(f"  Its license: {fam['license']}")
-    want = [fam["file"].format(q=model)]
+    want = [own_path_file(fam, model)]
     if a.vision in ("yes", "gpu", "cpu"):
         want.append(fam["mmproj"])
     folder = Path(a.models_dir) / (fam["tag"] + model)

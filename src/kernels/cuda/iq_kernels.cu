@@ -6437,6 +6437,11 @@ void native_expert_i8(const NativeExpertLayout& L, const unsigned long long* grp
     else if (L.d_type == 8) i8_launch<8, false>(tm, a, s);
     else if (L.d_type == 7) i8_launch<7, false>(tm, a, s);
     else if (L.d_type == 12) i8_launch<12, false>(tm, a, s);
+    else if (L.d_type == 16) i8_launch<16, false>(tm, a, s);   // the i-quant downs (UD-IQ2_XXS)
+    else if (L.d_type == 17) i8_launch<17, false>(tm, a, s);
+    else if (L.d_type == 18) i8_launch<18, false>(tm, a, s);
+    else if (L.d_type == 21) i8_launch<21, false>(tm, a, s);
+    else if (L.d_type == 22) i8_launch<22, false>(tm, a, s);
     else if (L.d_type == 13) i8_launch<13, false>(tm, a, s);
     else if (L.d_type == 14) i8_launch<14, false>(tm, a, s);
     else i8_launch<42, false>(tm, a, s);
