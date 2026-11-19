@@ -394,6 +394,8 @@ class Catalog:
         """`iq3_xxs` or `IQ3_XXS` (and an optional family) -> (family, model); raises ValueError with the closest match."""
         models, families, _ctx, _src = self.tables()
         names = list(models)
+        if family is not None and family in families:   # an own-path family's sizes (Ornith's UD-IQ2_XXS) need not be Flash-Next's
+            names += [m for m in self.strata.sizes_of(models, family) if m not in names]
         match = next((n for n in names if n.lower() == model.lower()), None)
         if match is None:
             near = S.closest(model, names)
