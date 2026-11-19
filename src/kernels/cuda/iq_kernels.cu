@@ -354,6 +354,38 @@ __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(const void* __restrict__ vb
 // gopinath87607), which agree with llama.cpp and with each other.
 constexpr int VDR_Q4_K = 2, VDR_Q5_K = 2, VDR_Q5_1 = 2, VDR_Q5_0 = 2, VDR_Q4_1 = 2, VDR_Q4_0 = 2, VDR_Q8_0 = 2, VDR_Q6_K = 1;
 
+// Q3_K downs (Unsloth's UD-Q3_K_XL of Ornith-1.5-122B, four layers): llama.cpp's vec_dot_q3_K_q8_1 (vecdotq.cuh, VDR 1),
+// transcribed
+constexpr int VDR_Q3_K = 1;
+__device__ __forceinline__ float vec_dot_q3_K_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                   const int& kbx, const int& iqs) {
+    const block_q3_K* bq3_K = (const block_q3_K*) vbq + kbx;
+    const int bq8_offset = QR3_K * (iqs / (QI3_K / 2));
+    const int scale_offset = iqs - iqs % QI8_1 + (iqs % QI8_1) / (QI8_1 / 2);
+    const float d = __half2float(bq3_K->d);
+    const int vl = get_int_b2(bq3_K->qs, iqs);
+    const int vh = ~get_int_b2(bq3_K->hmask, iqs % (QI3_K / 2)) >> bq8_offset;   // a 0 / 1 bit subtracts 4 / 0
+    float sumf = 0.0f;
+#pragma unroll
+    for (int i = 0; i < QR3_K; ++i) {
+        const int u = get_int_b4(bq8_1[bq8_offset + i].qs, iqs % QI8_1);
+        const float d8 = __low2float(bq8_1[bq8_offset + i].ds);
+        const int isc = scale_offset + 2 * i;
+        const int isc_low = isc % (QK_K / 32);
+        const int sc_shift_low = 4 * (isc / (QK_K / 32));
+        const int sc_low = (bq3_K->scales[isc_low] >> sc_shift_low) & 0xF;
+        const int isc_high = isc % (QK_K / 64);
+        const int sc_shift_high = 2 * (isc / (QK_K / 64));
+        const int sc_high = ((bq3_K->scales[(QK_K / 32) + isc_high] >> sc_shift_high) & 3) << 4;
+        const int sc = (sc_low | sc_high) - 32;
+        const int vil = (vl >> (2 * i)) & 0x03030303;
+        const int vih = ((vh >> i) << 2) & 0x04040404;
+        const int vi = __vsubss4(vil, vih);
+        sumf += d8 * (ggml_cuda_dp4a(vi, u, 0) * sc);
+    }
+    return d * sumf;
+}
+
 __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(const int* __restrict__ v, const int* __restrict__ u,
                                                              const uint8_t* __restrict__ sc, const uint8_t* __restrict__ m,
                                                              const half2& dm4, const float* __restrict__ d8) {
@@ -841,6 +873,8 @@ template<> struct Fmt<29> { static constexpr int qk = 256, ipb = 8, step = 1;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq1_m_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<42> { static constexpr int qk = 64, ipb = 2, step = 1;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_q2_0_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<11> { static constexpr int qk = 256, ipb = QI3_K / VDR_Q3_K, step = VDR_Q3_K;   // Q3_K (downs only)
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_q3_K_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<12> { static constexpr int qk = 256, ipb = QI4_K / VDR_Q4_K, step = VDR_Q4_K;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_q4_K_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<13> { static constexpr int qk = 256, ipb = QI5_K / VDR_Q5_K, step = VDR_Q5_K;
@@ -882,7 +916,7 @@ STRATA_TQP_FMT(149)
 // Q4_K / Q5_K / Q6_K and the 256-value i-quants as downs: Qwen3.6-35B-A3B (FF 512) and Ornith-1.5-122B (FF 1024:
 // Unsloth's UD-Q4_K_XL, and UD-IQ2_XXS with IQ1_S / IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS downs), whole 256-blocks per row;
 // Flash-Next's FF 640 never selects them
-#define STRATA_D_IQ256(X) X(16) X(17) X(18) X(19) X(21) X(22)
+#define STRATA_D_IQ256(X) X(16) X(17) X(18) X(19) X(21) X(22) X(11)   // (11: Q3_K, UD-Q3_K_XL)
 #ifdef STRATA_Q6K_EXPERTS
 #define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8) X(12) X(13) X(14) X(40) X(144) X(146) X(147) X(148) X(149) STRATA_D_IQ256(X)
 #else
