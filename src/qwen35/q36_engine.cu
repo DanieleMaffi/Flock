@@ -2451,6 +2451,46 @@ struct Engine {
     /// One layer for T rows: x (the residual) += mixer(h); then MoE; x += moe; `hout` = rms(x) * wn (the next norm).
     /// `li` indexes the layer's state; positions *dpos .. + T - 1 (device), p0 the same on the host (eager grids);
     /// `verify`: a verify window - the GDN state is read, not written (commit() writes it for the kept rows).
+    // ---- flock: STRATA_Q36_PROMPT_TIMES=1 - where a prompt's GPU time goes, per card: events at the stage boundaries of
+    // every prompt chunk (T > kGemmT), summed per stage when the prompt is done (pt_report).  A mark starts a segment of its
+    // stage; it ends at the card's next mark.
+    enum PtStage { PT_GDN, PT_ATTN, PT_EXPERTS, PT_SHARED, PT_OTHER, PT_N };
+    const bool pt_on = std::getenv("STRATA_Q36_PROMPT_TIMES") != nullptr;
+    bool pt_in_mtp = false;
+    std::vector<std::pair<cudaEvent_t, int>> pt_marks[2];
+    void pt_mark(int stage, int T) {
+        if (!pt_on || T <= kGemmT) return;
+        if (pt_in_mtp) stage = PT_OTHER;
+        cudaEvent_t e = nullptr;
+        CK(cudaEventCreate(&e));
+        CK(cudaEventRecord(e, st));
+        pt_marks[split() ? cur_dev : 0].emplace_back(e, stage);
+    }
+    void pt_report(int64_t n) {
+        if (!pt_on || (pt_marks[0].empty() && pt_marks[1].empty())) return;
+        static const char* names[PT_N] = {"linear attention (GDN)", "full attention", "routed experts (router included)",
+                                          "shared expert + combine", "embedding, hand-offs and waits, head, MTP pass"};
+        for (int d = 0; d < 2; ++d) {
+            auto& mk = pt_marks[d];
+            if (mk.size() < 2) continue;
+            if (split()) CK(cudaSetDevice(d));
+            double ms[PT_N] = {}, tot = 0;
+            for (size_t i = 0; i + 1 < mk.size(); ++i) {
+                CK(cudaEventSynchronize(mk[i + 1].first));
+                float t = 0;
+                CK(cudaEventElapsedTime(&t, mk[i].first, mk[i + 1].first));
+                ms[mk[i].second] += t;
+                tot += t;
+            }
+            std::fprintf(stderr, "strata-q36: prompt of %lld tokens, GPU %d busy %.0f ms:", (long long) n, d, tot);
+            for (int k = 0; k < PT_N; ++k)
+                if (ms[k] > 0) std::fprintf(stderr, " %s %.0f ms (%.0f%%);", names[k], ms[k], 100.0 * ms[k] / tot);
+            std::fputc('\n', stderr);
+            for (auto& e : mk) CK(cudaEventDestroy(e.first));
+            mk.clear();
+        }
+        if (split()) CK(cudaSetDevice(cur_dev));
+    }
     void layer(const Layer& L, size_t li, int T, int64_t p0, const int32_t* dpos, bool graph_mode, bool verify,
                const float* wn, float* hout) {
         const auto& g = m->g;
@@ -2458,6 +2498,7 @@ struct Engine {
         const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, D = (int) g.ssm_state_size;
         const int C = (int) g.ssm_conv_channels;
         const int H = (int) g.n_head, HKV = (int) g.n_head_kv, HD = (int) g.head_dim;
+        pt_mark(L.attn ? PT_ATTN : PT_GDN, T);
         if (!L.attn) {
             float* qkv_b = verify ? v_qkv[li] : qkv;
             float* hc_b = verify ? v_hc[li] : hc;
@@ -2574,6 +2615,7 @@ struct Engine {
             mm(L.wo, att, y, T);
         }
         add_rms_post(L, T);
+        pt_mark(PT_EXPERTS, T);
         // routed experts (one token: the router and the shared expert's gate in one product, the gate its last row)
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
@@ -2675,6 +2717,7 @@ struct Engine {
             K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
                                      std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
         }
+        pt_mark(PT_SHARED, T);
         // the shared expert, scaled by sigmoid(w . h)
         if (T > kGemmT) k_to_f16<<<grid1((int64_t) N * T), kThreads, 0, st>>>(h, x16, (int64_t) N * T);
         if (T <= kGemmT) {
@@ -2694,6 +2737,7 @@ struct Engine {
         if (hy_rows) moe_hybrid_cpu(li, T);   // the CPU pool's experts (while the GPU runs the rest), merged
         // the combine, the shared expert's gate, the residual add and the next norm in one launch
         moe_end(T, prow, sy, ext ? logits_r + g.n_expert : sgate, wn, hout, ext ? (int) g.n_expert + 1 : 1);
+        pt_mark(PT_OTHER, T);
     }
 
     /// The main model over T rows (device `tok`, positions p0 .. p0 + T - 1, also at *pos0): hmain gets every row's
@@ -2803,6 +2847,7 @@ struct Engine {
             if (!on_chunk(done)) break;
         }
         CK(cudaStreamSynchronize(st));   // device 1's stream waited for every chunk of device 0's: all of it is done
+        pt_report(done);
         return done;
     }
     /// logits [n][V] = W_out hn rows, and each row's greedy pick.
@@ -2853,7 +2898,10 @@ struct Engine {
         k_rms_ld<<<T, kThreads, 0, st>>>(seeds, N, m->mtp_hnorm, mtp_cat + N, 2 * N, N, m->eps);      // [... | h]
         mm(m->eh_proj, mtp_cat, x, T);
         k_rms<<<T, kThreads, 0, st>>>(x, m->mtp.attn_norm, h, N, m->eps);
+        pt_mark(PT_OTHER, T);
+        pt_in_mtp = true;
         layer(m->mtp, m->layers.size(), T, p0, pos0_m, graph_mode, false, m->mtp_shnorm, hmtp);
+        pt_in_mtp = false;
         if (draft) head_draft(hmtp + (size_t) (T - 1) * N);
     }
 
@@ -3257,6 +3305,7 @@ struct Engine {
             }
         }
         if (m->hybrid) rebalance(hybrid_swaps_after_prompt);
+        pt_report(n);
         return n;
     }
 
