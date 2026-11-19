@@ -1,4 +1,12 @@
-# Strata guides
+# Flock documentation
+
+Flock runs Ornith-1.5-122B on two 24 GB GPUs. Start with the [README](../README.md) (Docker quick start), then
+[ORNITH.md](ORNITH.md): how Ornith runs, every setting and every measurement.
+
+The guides below are Strata's, kept because Flock shares Strata's engine, server and settings. Their install steps,
+releases, desktop app and model families are Strata's, not Flock's.
+
+## Strata guides
 
 **New here? Start with [Install Strata](INSTALL.md).** Download the one installer for your system (Windows, Linux or Mac), or install the Terminal with one line. Both use released engine packages. This documentation is for version 0.2.15.
 

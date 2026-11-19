@@ -132,7 +132,7 @@ class NoEngineFlow(unittest.TestCase):
         self.assertIn("The model is ready, but Strata can't start it yet", out)
         self.assertIn("The feed has no engine package for this PC", out)
         self.assertIn("Next step:", out)
-        self.assertNotIn("Strata is serving", out)
+        self.assertNotIn("Flock is serving", out)
 
     def test_json_says_not_serving(self):
         from strata_cli.launch.runner import Runner

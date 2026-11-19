@@ -2578,7 +2578,7 @@ class Runner:
             tunnel = self.open_access()
             urls = acc.urls_for(self.s, tunnel_url=tunnel)
             res = Result(self.profile, urls, self.s.api_key, self.tune_word, self.notices, str(cfg), tunnel)
-            self.emit("done", "Strata is serving.", 100, urls=urls)
+            self.emit("done", "Flock is serving.", 100, urls=urls)
             return res
         except Cancelled:
             self._stop_children()

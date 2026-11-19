@@ -1,179 +1,94 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="340">
-  </picture>
-</p>
+# Flock
 
-<h3 align="center">Run powerful AI on your own computer.</h3>
-<p align="center">Chat, code and work with images, locally.</p>
+**Ornith-1.5-122B on your own two GPUs, at full GPU speed.**
 
-<p align="center">
-  <a href="#models">Models</a> · <a href="#install"><b>Install</b></a> ·
-  <a href="#hardware">Hardware</a> · <a href="#tools">Tools</a> ·
-  <a href="#help">Help</a> · <a href="#support-strata">Support</a>
-</p>
+Flock is a fork of [Strata](https://github.com/Niko1221/Strata) by Niko1221, specialised for
+[Ornith-1.5-122B](https://huggingface.co/ornith-ai/Ornith-1.5-122B), a 122B mixture-of-experts model (256 experts, 8 per
+token) built for coding and agent work. It runs Ornith on two 24 GB consumer cards with every expert in VRAM, and serves
+it through an OpenAI- and Anthropic-compatible API.
 
-<p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?label=download&color=0ab887" alt="Download Strata"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor-EA4AAA?logo=githubsponsors&logoColor=fff" alt="Sponsor Strata on GitHub Sponsors"></a>
-  <a href="https://buymeacoffee.com/strataengine"><img src="https://img.shields.io/badge/Buy_me_a_coffee-FFDD00?logo=buymeacoffee&logoColor=000" alt="Support Strata on Buy Me a Coffee"></a>
-</p>
+> Status: experimental. Measured on one machine (below). The quality comparison with other models is in progress.
 
-<p align="center"><sub><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <a href="README.pl.md">Polski</a></sub></p>
+## What it does
 
-**Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
+- **Two GPUs, one model.** The layers are split over two cards; each card holds its layers' weights and experts, and
+  only the hidden rows travel between them. No NVLink or peer access needed (GeForce cards have none).
+- **Every expert in VRAM.** With Unsloth's UD-IQ2_XXS (42 GB), an int8 attention cache and tight buffers, all of
+  Ornith's experts fit on two 24 GB cards at a 64K context. The CPU does no expert work at all.
+- **Fast decode.** The token loop runs as CUDA graphs across both cards, and Ornith's own MTP layer drafts tokens ahead:
+  96-129 tokens/s.
+- **Fast prompts.** Prompt chunks are pipelined across the cards (the first starts chunk n + 1 while the second
+  finishes chunk n), on int8 kernels for Ornith's quant formats: a 3,445-token prompt is read in 2.6 s.
+- **Bigger quants when you want them.** Sizes that do not fit in VRAM run in a hybrid mode: the busiest experts on the
+  GPUs (pre-filled from a recorded usage profile), the rest computed on the CPU straight from the mapped file.
 
-## Models
+## Measured
 
-We recommend **ISTA-DASLab first**, then **Unsloth** and other providers, where a compatible model fits.
+> Two RTX 3090 24 GB (PCIe 4.0, no peer access), Intel i9-11900 (8 cores), 62 GB RAM, NVMe; Ornith-1.5-122B
+> UD-IQ2_XXS, 64K context; greedy, 64 tokens on each of 10 prompts and one 3,445-token prompt; November 2026.
 
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.8-Flash-Next</b></summary>
+| | Decode | 3,445-token prompt |
+| --- | ---: | ---: |
+| Flock, MTP drafting on (the default) | 96-129 tokens/s | 2.6 s |
+| Flock, MTP off | 95-101 tokens/s | 2.6 s |
+| llama.cpp (`--fit on`), same file and cards | 87-88 tokens/s | 2.4 s |
 
-| Provider | Choices |
-| --- | --- |
-| **ISTA-DASLab · recommended** | Q2\_0, IQ2\_XS, IQ3\_XXS, IQ3\_S. [Coder: IQ1\_M](docs/MODELS.md#coder) for coding. |
-| **Unsloth** | UD-IQ4\_XS, UD-Q4\_K\_XL, UD-Q5\_K\_XL, UD-Q6\_K\_XL, Q8\_0 |
-| **Gyro · agentionai** | [Gyro-S, Gyro-M](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF). Lower memory use but slower. |
-| **Other options** | [Swift 1.5](docs/MODELS.md#swift-15), [NVFP4](docs/NVFP4.md), [OrcaRouter](docs/ORCA.md) |
+A 32,000-token prompt takes 28 s (1,130 tokens/s). Where the time goes, and what is still slow:
+[docs/ORNITH.md](docs/ORNITH.md).
 
-[Compare sizes, memory needs and compatibility](docs/MODELS.md).
+**Quality.** UD-IQ2_XXS is a 2-bit file: Unsloth measures it at about 87.7% top-1 agreement with the full model in chat,
+against 93.8% for UD-Q4_K_XL and 95.3% for Q8_0. Larger sizes run too, more slowly; a coding comparison of the sizes
+against other models is under way and will be added here.
 
-</details>
+## Quick start (Docker)
 
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.6-35B-A3B</b></summary>
-
-**Unsloth:** UD-Q4_K_XL, UD-Q6_K_XL, Q8_0. These are the currently documented packs for this model.
-
-[Model guide and compatibility](docs/QWEN36.md).
-
-</details>
-
-<a id="the-other-sizes"></a>
-
-Not sure what fits? [Choose a model for your computer](docs/MODELS.md#pick-by-memory).
-
-## Install
-
-<a id="option-a-the-strata-app"></a>
-
-### Desktop app
-
-**[Download Strata for Windows, Linux or Mac →](https://github.com/Niko1221/Strata/releases/latest)**
-
-Install the app, choose a model, and start chatting. There is one installer for each system. On first start the app
-downloads the engine for your graphics card. [Help with the installer](docs/INSTALL.md#the-app).
-
-<sub>Files: `Strata-0.2.15-windows-x64-setup.exe` · `Strata-0.2.15-linux-x86_64.AppImage` · `Strata-0.2.15-macos-arm64.dmg`</sub>
-
-<p align="center">
-  <img src="docs/media/app-chat.png" width="900" alt="Strata desktop app with a chat and live code preview side by side">
-  <br><sub>Chat, files and a live preview in one window.</sub>
-</p>
-
-<a id="option-b-the-terminal-one-line"></a>
-
-### Terminal app
-
-Prefer the terminal? Install Strata, then run **`strata launch`**.
-
-<details open>
-<summary><b>Install commands</b></summary>
-
-**Linux / Mac**
+You need two NVIDIA GPUs with 24 GB each, about 64 GB of RAM, the NVIDIA driver 580 or newer and the NVIDIA Container
+Toolkit.
 
 ```sh
-curl -fsSL --connect-timeout 15 --max-time 120 https://github.com/Niko1221/Strata/releases/latest/download/install.sh -o install.sh && sh install.sh
+git clone https://github.com/DanieleMaffi/Flock.git && cd Flock
+cp .env.example .env            # set API_KEY, and FLOCK_COMMIT to the output of: git rev-parse HEAD
+docker volume create flock_data
+docker compose build            # compiles the engine for your cards, 20-40 minutes
 ```
 
-**Windows PowerShell**
-
-```powershell
-irm -TimeoutSec 120 https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
-```
-
-On Windows, open a new terminal afterwards. Then:
+Download the model into the volume (42 GB; the files are checked against pinned SHA-256 sums, and a broken download
+resumes):
 
 ```sh
-strata launch
+docker run --rm -v flock_data:/data -v "$PWD/tools/ornith:/t:ro" --entrypoint /opt/strata/terminal/python/bin/python3 \
+  flock:local /t/fetch.py /data/Strata-data/models/ornith-ud-iq2_xxs UD-IQ2_XXS
 ```
 
-Follow the prompts to download and start a model. [Terminal guide](docs/TERMINAL_LAUNCH.md).
+Start it:
 
-</details>
+```sh
+docker compose up -d && docker compose logs -f
+```
 
-<p align="center">
-  <img src="docs/media/terminal-monitor.png" width="900" alt="Strata terminal app showing model activity, speed, memory and recent requests">
-  <br><sub>Watch your model and hardware while it runs.</sub>
-</p>
+The server answers at `http://<host>:8000/v1` (OpenAI) and `http://<host>:8000/v1/messages` (Anthropic), with the
+`API_KEY` from `.env`. Ornith is a reasoning model: its thinking comes back in `reasoning_content`.
 
-<a id="build-from-source"></a>
+## Sizes
 
-[Build from source](docs/SOURCE_INSTALL.md) · [Docker](docs/DOCKER.md) · [Full install guide](docs/INSTALL.md)
+| Size | File | Fits two 24 GB cards | Notes |
+| --- | ---: | --- | --- |
+| UD-IQ2_XXS | 42 GB | every expert, at 64K | the default; the speeds above |
+| UD-Q3_K_XL | 60 GB | about 63% of the experts | about half the 2-bit size's quality loss; slower |
+| UD-Q4_K_XL | 80 GB | about a third | close to the full model; 12-23 tokens/s |
 
-<a id="what-you-need"></a>
+To change size, set `MODEL` and `MODEL_PATH` in `.env`, fetch it with `tools/ornith/fetch.py` and restart.
 
-## Hardware
+## Documentation
 
-| Supported hardware | Guide |
-| --- | --- |
-| **NVIDIA GeForce RTX 20 / 30 / 40 / 50 series** | [NVIDIA setup](docs/INSTALL.md#what-you-need) |
-| **AMD Radeon RX 7700 / 7800 / 7900, RX 9060 / 9070, AI PRO R9700** | [AMD setup](docs/AMD_HIP.md) |
-| **AMD Radeon RX 6800 / 6900 · experimental** | [RX 6000 setup](docs/AMD_HIP.md#rdna2-gfx1030) |
-| **Intel Arc · Linux** | [Intel setup](docs/INTEL_ARC.md) |
-| **Apple Silicon · M1 or newer** | [Mac setup](docs/MAC.md) |
-| **AMD Ryzen AI Max · Strix Halo** | [Strix Halo setup](docs/STRIX_HALO.md) |
-| **NVIDIA DGX Spark · Linux** | [DGX Spark setup](docs/DGX_SPARK_LINUX.md) |
+- [docs/ORNITH.md](docs/ORNITH.md): how Flock runs Ornith, every setting, every measurement, what is not done yet.
+- [docs/README.md](docs/README.md): the other documents, most of them Strata's, kept for the engine they describe.
 
-<a id="using-it"></a>
+## Credits and license
 
-## Tools
+Flock is a fork of [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors: the engine, the server
+and the tools are theirs; Flock adds the Ornith path (the two-GPU split, the tiered and resident modes, the int8 cache,
+the formats and kernels Ornith needs). The model is [Ornith-1.5-122B](https://huggingface.co/ornith-ai/Ornith-1.5-122B)
+by ornith-ai (MIT); the GGUF files are [Unsloth's](https://huggingface.co/unsloth/Ornith-1.5-122B-GGUF).
 
-**Claude Code · Codex CLI · OpenCode · oh-my-pi · pi.dev · Hermes Agent · OpenClaw**, and more through the OpenAI- and Anthropic-compatible APIs.
-
-Run **`strata connect`** to see setup instructions for your tool. [Connection guide](docs/TERMINAL_LAUNCH.md#connect-your-apps-strata-connect).
-
-<a id="guides"></a>
-<a id="how-fast-is-it"></a>
-<a id="how-does-it-work"></a>
-<a id="something-went-wrong"></a>
-
-## Help
-
-[All guides](docs) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Report a bug](https://github.com/Niko1221/Strata/issues/new/choose) ·
-[Benchmarks](docs/COMMUNITY_BENCHMARKS.md) · [How it works](docs/HOW_IT_WORKS.md) · [Contribute](CONTRIBUTING.md)
-
-## Support Strata
-
-**Help keep local AI open to everyone.** A GitHub sponsorship or a coffee helps fund development and testing on more hardware.
-
-<a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor_on_GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors: sponsor Strata" height="48"></a>
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee: support Strata" height="48"></a>
-
-### Loyal supporters
-
-Thank you to everyone who supports Strata.
-
-<!-- supporters:start (one line per public supporter, newest last; copy a line and change the GitHub name in all four places) -->
-<a href="https://github.com/ryan4yin"><img src="https://github.com/ryan4yin.png?size=96" width="48" height="48" alt="ryan4yin" title="ryan4yin"></a>
-<a href="https://github.com/themactep"><img src="https://github.com/themactep.png?size=96" width="48" height="48" alt="themactep" title="themactep"></a>
-<a href="https://github.com/macintog"><img src="https://github.com/macintog.png?size=96" width="48" height="48" alt="macintog" title="macintog"></a>
-<a href="https://github.com/bisonbet"><img src="https://github.com/bisonbet.png?size=96" width="48" height="48" alt="bisonbet" title="bisonbet"></a>
-<a href="https://github.com/vizv"><img src="https://github.com/vizv.png?size=96" width="48" height="48" alt="vizv" title="vizv"></a>
-<a href="https://github.com/kod88vn"><img src="https://github.com/kod88vn.png?size=96" width="48" height="48" alt="kod88vn" title="kod88vn"></a>
-<a href="https://github.com/seoulworker"><img src="https://github.com/seoulworker.png?size=96" width="48" height="48" alt="seoulworker" title="seoulworker"></a>
-<a href="https://github.com/jackyini"><img src="https://github.com/jackyini.png?size=96" width="48" height="48" alt="jackyini" title="jackyini"></a>
-<a href="https://github.com/router0mail"><img src="https://github.com/router0mail.png?size=96" width="48" height="48" alt="router0mail" title="router0mail"></a>
-<!-- supporters:end -->
-
-[MIT license](LICENSE) · [Credits and model licenses](docs/HOW_IT_WORKS.md#credits) · [Privacy](docs/SAFETY.md)
-
-<a id="option-c-let-your-ai-set-it-up"></a>
-
-<sub>For AI tools and automated readers: <a href="AGENTS.md">technical reference</a> · <a href="docs/AI_SETUP.md">setup instructions</a>.</sub>
-
-**Sponsorships, hardware partnerships or collaborations:** [niko.veit@outlook.com](mailto:niko.veit@outlook.com).
-
+[MIT License](LICENSE), as Strata.

@@ -930,7 +930,7 @@ def run_launch(a: argparse.Namespace) -> int:
                               "notices": result.notices + [n.line() for n in notes] + ([runner.key_written_notice] if runner.key_written_notice and runner.key_written else [])}))
             return 0
         _say("")
-        _say("Already serving these choices; nothing was restarted." if result.reused else "Strata is serving.")
+        _say("Already serving these choices; nothing was restarted." if result.reused else "Flock is serving.")
         for u in result.urls:
             label = ("This computer" if "127.0.0.1" in u else "Cloudflare" if "trycloudflare" in u else
                      "Tailscale" if ("ts.net" in u or u.split("//")[1].startswith("100.")) else "Network")

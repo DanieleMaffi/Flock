@@ -1,0 +1,64 @@
+# Flock: Ornith-1.5-122B on two NVIDIA GPUs (README.md).
+# OpenAI API:    http://<server>:${PORT}/v1/chat/completions
+# Anthropic API: http://<server>:${PORT}/v1/messages
+#
+# 1. The model, once, into the volume (UD-IQ2_XXS, 42 GB; other sizes: tools/ornith/fetch.py):
+#      docker volume create flock_data
+#      docker compose build
+#      docker run --rm -v flock_data:/data -v "$PWD/tools/ornith:/t:ro" --entrypoint /opt/strata/terminal/python/bin/python3 \
+#        flock:local /t/fetch.py /data/Strata-data/models/ornith-ud-iq2_xxs UD-IQ2_XXS
+# 2. cp .env.example .env, set API_KEY, then:  docker compose up -d && docker compose logs -f
+#
+# Everything below comes from .env.
+
+services:
+  flock:
+    build:
+      context: .
+      args:
+        # 86 = RTX 3090; 89 = RTX 40; 120 = RTX 50
+        CUDA_ARCHITECTURES: "${CUDA_ARCHITECTURES:-86}"
+        BUILD_VISION: "${BUILD_VISION:-1}"
+        # the commit the image is built from (git rev-parse HEAD); needed when the build context has no .git
+        STRATA_COMMIT: "${FLOCK_COMMIT:-}"
+    image: flock:local
+    container_name: flock
+    restart: unless-stopped
+
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+
+    environment:
+      FAMILY: ornith
+      MODEL: "${MODEL:-UD-IQ2_XXS}"
+      MODEL_PATH: "${MODEL_PATH:-/data/Strata-data/models/ornith-ud-iq2_xxs}"
+      CONTEXT: "${CONTEXT:-65536}"
+      # requests at once: each keeps its own conversation cache, room the experts would use
+      PARALLEL: "${PARALLEL:-1}"
+      VISION: "${VISION:-no}"
+      # two cards: the layers split over both; GPUS=0 runs on one
+      GPUS: "${GPUS:-0,1}"
+      PORT: "${PORT:-8000}"
+      API_KEY: "${API_KEY:-}"
+      # advanced engine settings, space separated KEY=VALUE (docs/ORNITH.md lists the STRATA_Q36_* ones)
+      STRATA_SET: "${STRATA_SET:-}"
+
+    volumes:
+      - "flock_data:/data"
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  flock_data:
+    external: true

@@ -271,7 +271,7 @@ phase preparing
 if [ -n "${MODEL:-}" ]; then what="$MODEL${model_path:+ from $model_path}"
 elif [ -n "$model_path" ]; then what="the model files in $model_path"
 else what="the recommended model"; fi
-say "Starting Strata: $what (preset '$PRESET')."
+say "Starting Flock: $what (preset '$PRESET')."
 if [ -n "$key" ]; then
   STRATA_LAUNCH_KEY="$key" "$PYBIN" -c "$RESET_INT" "$STRATA" "$@" &
 else

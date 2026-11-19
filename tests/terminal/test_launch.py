@@ -1035,7 +1035,7 @@ class FlagsCommand(unittest.TestCase):
         with mock.patch.object(Runner, "run", return_value=fake):
             code, out, err = run_cli(["launch", "--no-tui", "--model", "q2_0", "--access", "lan", "--save-preset", "Office"])
         self.assertEqual(code, 0, err)
-        self.assertIn("Strata is serving.", out)
+        self.assertIn("Flock is serving.", out)
         self.assertIn("http://127.0.0.1:8080/v1", out)
         self.assertIn("http://192.168.1.5:8080/v1", out)
         self.assertNotIn("sk-strata-abcdefghijkl", out)                      # the key is masked
