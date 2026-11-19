@@ -1604,8 +1604,13 @@ struct Engine {
         cur_dev = d;
         bank_in(banks[d]);
         CK(cudaStreamWaitEvent(st, ev_hop[from], 0));
+        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+        CK(cudaStreamIsCapturing(st, &cs));
         auto cp = [&](void* dst, const void* src, size_t bytes) {
-            if (dst && src && bytes) CK(cudaMemcpyPeerAsync(dst, d, src, from, bytes, st));
+            if (!dst || !src || !bytes) return;
+            // a graph cannot record cudaMemcpyPeerAsync; a plain copy over the unified addresses it can (graph_probe checked)
+            if (cs == cudaStreamCaptureStatusActive) CK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDefault, st));
+            else CK(cudaMemcpyPeerAsync(dst, d, src, from, bytes, st));
         };
         const size_t N = (size_t) m->g.n_embd;
         if (carry > 0) {
@@ -1625,6 +1630,37 @@ struct Engine {
     }
     /// Home (device 1) again, after the other card's work.
     void go_home() { use_dev(1); }
+    /// Whether a graph over both cards works on this driver: the hop pattern of a forward (an event into device 0's stream,
+    /// a copy between the cards, an event back) captured, instantiated and run once.  False: decode without graphs.
+    bool graph_probe() {
+        cudaGraph_t gr = nullptr;
+        cudaGraphExec_t gx = nullptr;
+        float *a = nullptr, *b = nullptr;
+        go_home();
+        CK(cudaMalloc(&b, 256));
+        use_dev(0);
+        CK(cudaMalloc(&a, 256));
+        go_home();
+        CK(cudaStreamSynchronize(st));
+        bool ok = cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
+        if (ok) {
+            use_dev(0, 0, 0);
+            const cudaError_t e1 = cudaMemcpyAsync(b, a, 256, cudaMemcpyDefault, st);
+            go_home();
+            const cudaError_t e2 = cudaStreamEndCapture(st, &gr);
+            ok = e1 == cudaSuccess && e2 == cudaSuccess && cudaGraphInstantiate(&gx, gr, 0) == cudaSuccess &&
+                 cudaGraphLaunch(gx, st) == cudaSuccess && cudaStreamSynchronize(st) == cudaSuccess;
+        }
+        (void) cudaGetLastError();
+        if (gx) (void) cudaGraphExecDestroy(gx);
+        if (gr) (void) cudaGraphDestroy(gr);
+        (void) cudaFree(b);
+        use_dev(0);
+        (void) cudaFree(a);
+        go_home();
+        (void) cudaGetLastError();
+        return ok;
+    }
     int hybrid_t = 32;
     bool main_hybrid = false;   // some main layer is hybrid (else only the MTP block is: the decode graph stays)
     bool mtp_graph = true;      // the MTP draft step may be a graph (not when its layer is hybrid)
@@ -3646,18 +3682,40 @@ bool place_split(Model& m, Engine& E, int threads, int hybrid_t, int slots, std:
         const double avail = available_ram_bytes();
         m.tiered = tv ? std::atoi(tv) != 0 : (avail > 0 && (double) host > 0.85 * avail);
     }
-    const size_t reserve = (size_t) 768 << 20;
+    // the check below keeps 0.5 GiB back per card (the graphs, cuBLAS's workspace); the hybrid placement keeps 0.75 as before
+    const size_t reserve_resident = (size_t) 512 << 20, reserve = (size_t) 768 << 20;
     // every expert fits on its card (UD-IQ2_XXS on two 24 GB cards): no hybrid mode at all - no CPU pool in the token path,
     // no host copy of the experts, no staging, and the decode may run as CUDA graphs across both cards (graph_run falls
     // back to eager launches if the driver refuses one).  Else the hybrid placement below.
     bool resident = slots <= 0;
-    for (int d = 0; d < 2 && resident; ++d) {
-        E.use_dev(d);
-        size_t need = 0, fr = 0, tot = 0;
-        for (size_t li = 0; li < all.size(); ++li)
-            if (m.dev_of(li) == d) need += all[li]->stride * (size_t) ne + kMmqTail;
-        CK(cudaMemGetInfo(&fr, &tot));
-        resident = need + reserve <= fr;
+    size_t need[2] = {0, 0}, fr[2] = {0, 0};
+    auto measure = [&] {
+        for (int d = 0; d < 2; ++d) {
+            E.use_dev(d);
+            size_t tot = 0;
+            CK(cudaMemGetInfo(&fr[d], &tot));
+        }
+        E.go_home();
+    };
+    for (size_t li = 0; li < all.size(); ++li) need[m.dev_of(li)] += all[li]->stride * (size_t) ne + kMmqTail;
+    measure();
+    // a near fit: the prompt attention's score buffers at 64 + 32 MB instead of 256 + 128 on both cards (the size is the
+    // engine's, not a card's; more, smaller slices of a long prompt), as place_experts does for one card
+    const size_t att_save = (E.kAttScoreFloats - ((size_t) 16 << 20)) * 6;
+    bool near = false;
+    for (int d = 0; d < 2; ++d) near = near || (need[d] + reserve_resident > fr[d] && need[d] + reserve_resident <= fr[d] + att_save);
+    if (resident && near) {
+        for (int d = 0; d < 2; ++d) {
+            E.use_dev(d);
+            E.shrink_att((size_t) 16 << 20);
+        }
+        E.go_home();
+        measure();
+    }
+    for (int d = 0; d < 2; ++d) {
+        std::fprintf(stderr, "strata-q36: GPU %d: its layers' routed experts %.2f GiB, %.2f GiB free (%.2f GiB kept back)\n", d,
+                     (double) need[d] / (1 << 30), (double) fr[d] / (1 << 30), (double) reserve_resident / (1 << 30));
+        resident = resident && need[d] + reserve_resident <= fr[d];
     }
     E.go_home();
     if (std::getenv("STRATA_Q36_SPLIT_HYBRID")) resident = false;   // (tests: the hybrid placement anyway)
@@ -3666,6 +3724,11 @@ bool place_split(Model& m, Engine& E, int threads, int hybrid_t, int slots, std:
         m.tiered = false;
         E.main_hybrid = false;
         E.hybrid_t = E.tmax;
+        if (E.use_graph && !E.graph_probe()) {
+            E.use_graph = false;
+            E.mtp_graph = false;
+            std::fprintf(stderr, "strata-q36: this driver refuses a CUDA graph over both GPUs: the decode runs eager\n");
+        }
         E.hy.resize(all.size());
         for (size_t li = 0; li < all.size(); ++li) {
             Layer& L = *all[li];
@@ -4937,6 +5000,9 @@ int strata::qwen35::run(int argc, char** argv) {
             // would take the slots' room, falls back to less
             const double fr_gib = (double) fr / GiB;
             chunk = fr_gib >= 7.5 ? 2048 : fr_gib >= 5.5 ? 1024 : 512;
+            // flock: the split - 1024, whose buffers leave UD-IQ2_XXS's every expert room on two 24 GB cards at 64K (2048 does
+            // not: GPU 1 short by 0.7 GiB); the pipeline keeps both cards busy at it (3,445 tokens in 2.6 s)
+            if (m.split >= 0) chunk = 1024;
         }
         if (const char* cv = std::getenv("STRATA_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
         if (std::getenv("STRATA_Q36_PLACE_DEBUG"))
