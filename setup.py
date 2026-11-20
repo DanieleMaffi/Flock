@@ -784,6 +784,9 @@ ORNITH_FILES = {   # unsloth/Ornith-1.5-122B-GGUF at HF_REVISIONS' commit
     "Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf": (10942929, "7159d31a6a6ce5528500b490880383844c3c9b21fcdaad94e66c9e65233ff359"),
     "Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf": (49971099680, "e66952128394bb4c75554c7e10a12a8b63dd1c7f049d876a02885a946e30c1c3"),
     "Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf": (29731729056, "21325ec18a9e3210eeffada0fc327a25a79171918f1d04f8f0a06b61866ac9ba"),
+    "Ornith-1.5-122B-UD-Q3_K_XL-00001-of-00003.gguf": (10942929, "d8a23c487741fdac7026e10013fa8e320502cf01048a2333b2db8ba2a9f74fe5"),
+    "Ornith-1.5-122B-UD-Q3_K_XL-00002-of-00003.gguf": (49791670080, "95f76e67ffc49e2b0b4a4dfe5c42269b4b275ecf9e3696f599f3eeac92180323"),
+    "Ornith-1.5-122B-UD-Q3_K_XL-00003-of-00003.gguf": (9958641536, "1c4b52bbb1d45a21b5b7927429a5c80f264c688f2d14ed50ba0b6da0260d4028"),
     "Ornith-1.5-122B-UD-IQ2_XXS.gguf": (41967395072, "0497778d4f7f5008dec2d4b102183a699faf8433d0102dd143e86f9db13a3adc"),
     "mmproj-F16.gguf": (908724544, "39db176176a904b101f5173a4f03e785990f9279f94ab373c4fd629ae7011817"),
 }
@@ -802,6 +805,8 @@ LOCAL_FAMILIES = {"ornith": {
     # RAM: the tiered mode keeps no copy of the experts; what RAM there is serves as their page cache (measured: runs on a
     # 62 GB PC with one RTX 3090)
     "models": {"UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic), 42 GB: every expert in VRAM on two 24 GB cards", "ram_gb": 48},
+               "UD-Q3_K_XL": {"about": "3-bit (Unsloth Dynamic), 60 GB in three files: about half the 2-bit size's quality loss",
+                              "ram_gb": 48},
                "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), 80 GB in three files: closer to the full model, much slower",
                               "ram_gb": 48}},
     "sha256": ORNITH_FILES,
